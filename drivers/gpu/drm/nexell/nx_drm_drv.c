@@ -25,32 +25,45 @@
 
 #include "nx_drm_drv.h"
 #include "nx_drm_crtc.h"
+#include "nx_drm_connector.h"
 #include "nx_drm_encoder.h"
 #include "nx_drm_fb.h"
 #include "nx_drm_plane.h"
 #include "nx_drm_gem.h"
 
+/*
+ * DRM Configuration
+ *
+ * CRTC		    : MLC top control (and display interrupt, reset, clock, ...)
+ * Plane	    : MLC layer control
+ * Encoder	    : DPC control
+ * Connector	: DRM connetcor for LCD, LVDS, MiPi, HDMI,...
+ * Panel	    : Display device control (LCD, LVDS, MiPi, HDMI,...)
+ *
+ */
+
 static void nx_drm_output_poll_changed(struct drm_device *drm)
 {
 	struct nx_drm_priv *priv = drm->dev_private;
-	struct nx_framebuffer_dev *nx_fbdev = priv->fbdev;
+	struct nx_framebuffer_dev *nx_framebuffer = priv->framebuffer_dev;
 
-	DRM_DEBUG_KMS("enter : fbdev %s\n", nx_fbdev ? "exist" : "non exist");
+	DRM_DEBUG_KMS("enter : fbdev %s\n",
+		nx_framebuffer ? "exist" : "non exist");
 
 	mutex_lock(&priv->lock);
 
-	if (nx_fbdev && nx_fbdev->fbdev)
+	if (nx_framebuffer && nx_framebuffer->fbdev)
 		drm_fb_helper_hotplug_event(
-			(struct drm_fb_helper *)nx_fbdev->fbdev);
+			(struct drm_fb_helper *)nx_framebuffer->fbdev);
 	else
-		nx_drm_framebuffer_dev_init(drm);
+		nx_drm_framebuffer_init(drm);
 
 	mutex_unlock(&priv->lock);
 	DRM_DEBUG_DRIVER("exit.\n");
 }
 
 static struct drm_mode_config_funcs nx_mode_config_funcs = {
-	.fb_create = drm_fb_cma_create,
+	.fb_create = nx_drm_fb_mode_create,
 	.output_poll_changed = nx_drm_output_poll_changed,
 };
 
@@ -132,7 +145,7 @@ static int nx_drm_unload(struct drm_device *drm)
 {
 	DRM_DEBUG_DRIVER("enter\n");
 
-	nx_drm_framebuffer_dev_fini(drm);
+	nx_drm_framebuffer_fini(drm);
 
 	drm_vblank_cleanup(drm);
 	drm_kms_helper_poll_fini(drm);
@@ -144,10 +157,12 @@ static int nx_drm_unload(struct drm_device *drm)
 }
 
 static struct drm_ioctl_desc nx_drm_ioctls[] = {
-	DRM_IOCTL_DEF_DRV(NX_GEM_CREATE,
-		nx_drm_gem_create_ioctl, DRM_UNLOCKED | DRM_AUTH),
-	DRM_IOCTL_DEF_DRV(NX_GEM_GET,
-		nx_drm_gem_get_ioctl, DRM_UNLOCKED),
+	DRM_IOCTL_DEF_DRV(NX_GEM_CREATE, nx_drm_gem_create_ioctl,
+			DRM_UNLOCKED | DRM_AUTH),
+	DRM_IOCTL_DEF_DRV(NX_GEM_SYNC, nx_drm_gem_sync_ioctl,
+			DRM_UNLOCKED | DRM_AUTH),
+	DRM_IOCTL_DEF_DRV(NX_GEM_GET, nx_drm_gem_get_ioctl,
+			DRM_UNLOCKED),
 };
 
 static const struct file_operations nx_drm_driver_fops = {
@@ -161,27 +176,18 @@ static const struct file_operations nx_drm_driver_fops = {
 	.poll = drm_poll,
 	.read = drm_read,
 	.llseek = no_llseek,
-	.mmap = drm_gem_cma_mmap,
+	.mmap = nx_drm_gem_mmap,
 };
-
-static struct dma_buf *nx_drm_gem_prime_export(struct drm_device *drm,
-			struct drm_gem_object *obj,
-			int flags)
-{
-	/* we want to be able to write in mmapped buffer */
-	flags |= O_RDWR;
-	return drm_gem_prime_export(drm, obj, flags);
-}
 
 static void nx_drm_lastclose(struct drm_device *drm)
 {
 	struct nx_drm_priv *priv = drm->dev_private;
-	struct drm_fbdev_cma *fbdev;
+	struct nx_drm_fbdev *fbdev;
 
-	if (!priv || !priv->fbdev)
+	if (!priv || !priv->framebuffer_dev)
 		return;
 
-	fbdev = priv->fbdev->fbdev;
+	fbdev = priv->framebuffer_dev->fbdev;
 	if (fbdev)
 		drm_fb_helper_restore_fbdev_mode_unlocked(
 				(struct drm_fb_helper *)fbdev);
@@ -206,12 +212,18 @@ static void nx_drm_postclose(struct drm_device *drm, struct drm_file *file)
 	}
 }
 
+static const struct vm_operations_struct nx_drm_gem_vm_ops = {
+	.fault = nx_drm_gem_fault,
+	.open = drm_gem_vm_open,
+	.close = drm_gem_vm_close,
+};
+
 static struct drm_driver nx_drm_driver = {
-	.driver_features = DRIVER_HAVE_IRQ | DRIVER_MODESET | DRIVER_GEM |
-	    DRIVER_PRIME,
+	.driver_features = DRIVER_HAVE_IRQ | DRIVER_MODESET |
+		DRIVER_GEM | DRIVER_PRIME,
 	.load = nx_drm_load,
 	.unload = nx_drm_unload,
-	.fops = &nx_drm_driver_fops,
+	.fops = &nx_drm_driver_fops,	/* replace fops */
 	.lastclose = nx_drm_lastclose,
 	.postclose = nx_drm_postclose,
 	.set_busid = drm_platform_set_busid,
@@ -220,22 +232,23 @@ static struct drm_driver nx_drm_driver = {
 	.enable_vblank = nx_drm_crtc_enable_vblank,
 	.disable_vblank = nx_drm_crtc_disable_vblank,
 
-	.gem_free_object = drm_gem_cma_free_object,
-	.gem_vm_ops = &drm_gem_cma_vm_ops,
-
 	.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
 	.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
+
+	.gem_free_object = nx_drm_gem_free_object,
+	.gem_vm_ops = &nx_drm_gem_vm_ops,
+
 	.gem_prime_export = nx_drm_gem_prime_export,
 	.gem_prime_import = drm_gem_prime_import,
 	.gem_prime_get_sg_table = nx_drm_gem_prime_get_sg_table,
 
-	.gem_prime_import_sg_table = drm_gem_cma_prime_import_sg_table,
-	.gem_prime_vmap = drm_gem_cma_prime_vmap,
-	.gem_prime_vunmap = drm_gem_cma_prime_vunmap,
-	.gem_prime_mmap = drm_gem_cma_prime_mmap,
+	.gem_prime_import_sg_table = nx_drm_gem_prime_import_sg_table,
+	.gem_prime_vmap = nx_drm_gem_prime_vmap,
+	.gem_prime_vunmap = nx_drm_gem_prime_vunmap,
+	.gem_prime_mmap = nx_drm_gem_prime_mmap,
 
-	.dumb_create = drm_gem_cma_dumb_create,
-	.dumb_map_offset = drm_gem_cma_dumb_map_offset,
+	.dumb_create = nx_drm_gem_dumb_create,
+	.dumb_map_offset = nx_drm_gem_dumb_map_offset,
 	.dumb_destroy = drm_gem_dumb_destroy,
 
 	.ioctls = nx_drm_ioctls,
@@ -351,6 +364,80 @@ static const struct of_device_id dt_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, dt_of_match);
 
+
+static int nx_drm_pm_suspend(struct device *dev)
+{
+	struct drm_connector *connector;
+	struct drm_device *drm = dev_get_drvdata(dev);
+	struct nx_drm_priv *priv = drm->dev_private;
+	int i;
+
+	DRM_DEBUG_DRIVER("enter %s\n", dev_name(dev));
+
+	drm_modeset_lock_all(drm);
+
+	for (i = 0; i < priv->num_crtcs; i++)
+		to_nx_crtc(priv->crtcs[i])->suspended = true;
+
+	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
+		int old_dpms = connector->dpms;
+		struct nx_drm_device *display =
+				to_nx_connector(connector)->display;
+
+		if (display)
+			display->suspended = true;
+
+		if (connector->funcs->dpms)
+			connector->funcs->dpms(connector, DRM_MODE_DPMS_OFF);
+
+		/* Set the old mode back to the connector for resume */
+		connector->dpms = old_dpms;
+	}
+
+	drm_modeset_unlock_all(drm);
+
+	return 0;
+}
+
+static int nx_drm_pm_resume(struct device *dev)
+{
+	struct drm_connector *connector;
+	struct drm_device *drm = dev_get_drvdata(dev);
+	struct nx_drm_priv *priv = drm->dev_private;
+	int i;
+
+	DRM_DEBUG_DRIVER("enter %s\n", dev_name(dev));
+
+	drm_modeset_lock_all(drm);
+
+	for (i = 0; i < priv->num_crtcs; i++)
+		nx_drm_dp_crtc_reset(priv->crtcs[i]);
+
+	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
+		if (connector->funcs->dpms) {
+			int dpms = connector->dpms;
+			struct nx_drm_device *display =
+					to_nx_connector(connector)->display;
+
+			connector->dpms = DRM_MODE_DPMS_OFF;
+			connector->funcs->dpms(connector, dpms);
+			if (display)
+				display->suspended = false;
+		}
+	}
+
+	for (i = 0; i < priv->num_crtcs; i++)
+		to_nx_crtc(priv->crtcs[i])->suspended = false;
+
+	drm_modeset_unlock_all(drm);
+
+	return 0;
+}
+
+static const struct dev_pm_ops nx_drm_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(nx_drm_pm_suspend, nx_drm_pm_resume)
+};
+
 static struct platform_driver nx_drm_platform_drv = {
 	.probe = nx_drm_probe,
 	.remove = nx_drm_remove,
@@ -358,6 +445,7 @@ static struct platform_driver nx_drm_platform_drv = {
 		   .owner = THIS_MODULE,
 		   .name = "nexell,display_drm",
 		   .of_match_table = dt_of_match,
+		   .pm	= &nx_drm_pm_ops,
 		   },
 };
 module_platform_driver(nx_drm_platform_drv);

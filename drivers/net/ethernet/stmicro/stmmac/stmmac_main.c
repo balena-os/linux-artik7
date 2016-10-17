@@ -1697,7 +1697,7 @@ static void stmmac_init_tx_coalesce(struct stmmac_priv *priv)
  *  0 on success and an appropriate (-)ve integer as defined in errno.h
  *  file on failure.
  */
-static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
+static int stmmac_hw_setup(struct net_device *dev, bool init_ptp, bool init_fs)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 	int ret;
@@ -1741,10 +1741,13 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
 	}
 
 #ifdef CONFIG_DEBUG_FS
-	ret = stmmac_init_fs(dev);
-	if (ret < 0)
-		pr_warn("%s: failed debugFS registration\n", __func__);
+	if (init_fs) {
+		ret = stmmac_init_fs(dev);
+		if (ret < 0)
+			pr_warn("%s: failed debugFS registration\n", __func__);
+	}
 #endif
+
 	/* Start the ball rolling... */
 	pr_debug("%s: DMA RX/TX processes started...\n", dev->name);
 	priv->hw->dma->start_tx(priv->ioaddr);
@@ -1815,7 +1818,7 @@ static int stmmac_open(struct net_device *dev)
 		goto init_error;
 	}
 
-	ret = stmmac_hw_setup(dev, true);
+	ret = stmmac_hw_setup(dev, true, true);
 	if (ret < 0) {
 		pr_err("%s: Hw setup failed\n", __func__);
 		goto init_error;
@@ -3017,18 +3020,16 @@ int stmmac_suspend(struct net_device *ndev)
 	if (priv->phydev)
 		phy_stop(priv->phydev);
 
-	spin_lock_irqsave(&priv->lock, flags);
-
 	netif_device_detach(ndev);
 	netif_stop_queue(ndev);
 
 	napi_disable(&priv->napi);
 
+	spin_lock_irqsave(&priv->lock, flags);
+
 	/* Stop TX/RX DMA */
 	priv->hw->dma->stop_tx(priv->ioaddr);
 	priv->hw->dma->stop_rx(priv->ioaddr);
-
-	stmmac_clear_descriptors(priv);
 
 	/* Enable Power down mode by programming the PMT regs */
 	if (device_may_wakeup(priv->device)) {
@@ -3087,8 +3088,13 @@ int stmmac_resume(struct net_device *ndev)
 
 	netif_device_attach(ndev);
 
-	init_dma_desc_rings(ndev, GFP_ATOMIC);
-	stmmac_hw_setup(ndev, false);
+	priv->cur_rx = 0;
+	priv->dirty_rx = 0;
+	priv->dirty_tx = 0;
+	priv->cur_tx = 0;
+	stmmac_clear_descriptors(priv);
+
+	stmmac_hw_setup(ndev, false, false);
 	stmmac_init_tx_coalesce(priv);
 
 	napi_enable(&priv->napi);

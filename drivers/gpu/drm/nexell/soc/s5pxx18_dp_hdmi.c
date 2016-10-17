@@ -20,7 +20,6 @@
 #include <linux/delay.h>
 #include <linux/reset.h>
 #include <linux/hdmi.h>
-
 #include "s5pxx18_dp_hdmi.h"
 #include "s5pxx18_reg_hdmi.h"
 
@@ -488,7 +487,7 @@ static void hdmi_reg_infoframe(const struct hdmi_conf *conf,
 		hdmi_writeb(HDMI_AVI_BYTE(2), preset->aspect_ratio |
 			    AVI_SAME_AS_PIC_ASPECT_RATIO | AVI_ITU709);
 
-		if (preset->color_range == 0 || preset->color_range == 2)
+		if (preset->color_range == AVI_FULL_RANGE)
 			hdmi_writeb(HDMI_AVI_BYTE(3), AVI_FULL_RANGE);
 		else
 			hdmi_writeb(HDMI_AVI_BYTE(3), AVI_LIMITED_RANGE);
@@ -766,6 +765,37 @@ int hdmi_find_mode(struct videomode *vm, int refresh,
 	return -EINVAL;
 }
 
+static void hdmi_ops_base(struct dp_control_dev *dpc,
+				void __iomem **base, int num)
+{
+	u32 hdp_mask = (1 << 6) | (1 << 3) | (1 << 2);
+
+	hdmi_set_base(base[0]);
+
+	/* HPD interrupt control: INTC_CON */
+	hdmi_write(HDMI_INTC_CON_0, hdp_mask);
+}
+
+int hdmi_ops_resume(struct dp_control_dev *dpc)
+{
+
+	u32 hdp_mask = (1 << 6) | (1 << 3) | (1 << 2);
+
+	pr_debug("%s\n", __func__);
+
+	/* HPD interrupt control: INTC_CON */
+	hdmi_write(HDMI_INTC_CON_0, hdp_mask);
+
+	return 0;
+}
+
+int nx_dp_hdmi_suspend(struct nx_drm_device *display)
+{
+	pr_debug("%s\n", __func__);
+
+	return 0;
+}
+
 bool nx_dp_hdmi_is_connected(void)
 {
 	int state = hdmi_hpd_status();
@@ -773,17 +803,6 @@ bool nx_dp_hdmi_is_connected(void)
 	pr_debug("%s: %s\n", __func__, state ? "connected" : "disconnected");
 
 	return state ? true : false;
-}
-
-static void nx_dp_hdmi_set_base(struct dp_control_dev *dpc,
-				void __iomem *base)
-{
-	u32 mask = (1 << 6) | (1 << 3) | (1 << 2);
-
-	hdmi_set_base(base);
-
-	/* HPD interrupt control: INTC_CON */
-	hdmi_write(HDMI_INTC_CON_0, mask);
 }
 
 u32 nx_dp_hdmi_hpd_event(int irq)
@@ -876,7 +895,7 @@ static void hdmi_mode_to_display_mode(struct hdmi_res_mode *hm,
 
 int nx_dp_hdmi_mode_set(struct nx_drm_device *display,
 			struct drm_display_mode *mode, struct videomode *vm,
-			bool dvi_mode)
+			bool dvi_mode, int q_range)
 {
 	struct dp_hdmi_dev *out;
 	const struct hdmi_conf *conf;
@@ -905,6 +924,13 @@ int nx_dp_hdmi_mode_set(struct nx_drm_device *display,
 	preset = (struct hdmi_preset *)conf->preset;
 	preset->aspect_ratio = HDMI_PICTURE_ASPECT_16_9;
 	preset->dvi_mode = dvi_mode;
+	/* video quantization range is configuable
+	 * but fixed to limited range at artik710
+	 */
+	if (q_range == 0)
+		preset->color_range = AVI_LIMITED_RANGE;
+	else /* (q_range == 1) */
+		preset->color_range = AVI_FULL_RANGE;
 
 	out = dpc->dp_output;
 	out->preset_data = (void *)conf;
@@ -942,7 +968,7 @@ int nx_dp_hdmi_mode_commit(struct nx_drm_device *display, int pipe)
 	pr_debug("%s %s\n", __func__, preset->mode.name);
 
 	/* HDMI setup */
-	hdmi_reset(res->resets, res->num_resets);
+	hdmi_reset(res->dev_resets, res->num_dev_resets);
 
 	hdmi_phy_set(conf, HDMI_PHY_TABLE_SIZE);
 
@@ -1008,10 +1034,11 @@ void nx_dp_hdmi_power(struct nx_drm_device *display, bool on)
 }
 
 static struct dp_control_ops hdmi_dp_ops = {
-	.set_base = nx_dp_hdmi_set_base,
+	.set_base = hdmi_ops_base,
+	.resume = hdmi_ops_resume,
 };
 
-int nx_soc_dp_hdmi_register(struct device *dev,
+int nx_dp_device_hdmi_register(struct device *dev,
 			struct device_node *np, struct dp_control_dev *dpc)
 {
 	struct dp_hdmi_dev *out;

@@ -39,10 +39,6 @@
 #include <linux/of_gpio.h>
 #include <linux/mmc/slot-gpio.h>
 
-#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
-#include <linux/soc/nexell/cpufreq.h>
-#endif
-
 #include "dw_mmc.h"
 
 /* Common flag combinations */
@@ -1362,15 +1358,40 @@ static int dw_mci_get_cd(struct mmc_host *mmc)
 	return present;
 }
 
+static void dw_mci_hw_reset(struct mmc_host *mmc)
+{
+	struct dw_mci_slot *slot = mmc_priv(mmc);
+	struct dw_mci *host = slot->host;
+	int reset;
+
+#if IS_ENABLED(CONFIG_MMC_DW_IDMAC)
+	dw_mci_idmac_reset(host);
+#endif
+
+	if (!dw_mci_ctrl_reset(host, SDMMC_CTRL_DMA_RESET |
+				     SDMMC_CTRL_FIFO_RESET))
+		return;
+
+	/*
+	 * According to eMMC spec, card reset procedure:
+	 * tRstW >= 1us:   RST_n pulse width
+	 * tRSCA >= 200us: RST_n to Command time
+	 * tRSTH >= 1us:   RST_n high period
+	 */
+	reset = mci_readl(host, RST_N);
+	reset &= ~(SDMMC_RST_HWACTIVE << slot->id);
+	mci_writel(host, RST_N, reset);
+	usleep_range(1, 2);
+	reset |= SDMMC_RST_HWACTIVE << slot->id;
+	mci_writel(host, RST_N, reset);
+	usleep_range(200, 300);
+}
+
 static void dw_mci_init_card(struct mmc_host *mmc, struct mmc_card *card)
 {
 	struct dw_mci_slot *slot = mmc_priv(mmc);
 	struct dw_mci *host = slot->host;
 
-#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
-	if (card->type == MMC_TYPE_SDIO)
-		nx_bus_qos_update(NX_BUS_CLK_HIGH_KHZ);
-#endif
 	/*
 	 * Low power mode will stop the card clock when idle.  According to the
 	 * description of the CLKENA register we should disable low power mode
@@ -1451,6 +1472,7 @@ static const struct mmc_host_ops dw_mci_ops = {
 	.set_ios		= dw_mci_set_ios,
 	.get_ro			= dw_mci_get_ro,
 	.get_cd			= dw_mci_get_cd,
+	.hw_reset               = dw_mci_hw_reset,
 	.enable_sdio_irq	= dw_mci_enable_sdio_irq,
 	.execute_tuning		= dw_mci_execute_tuning,
 	.card_busy		= dw_mci_card_busy,
@@ -2438,8 +2460,10 @@ static int dw_mci_init_slot(struct dw_mci *host, unsigned int id)
 	if (host->pdata->caps)
 		mmc->caps = host->pdata->caps;
 
-	if (host->pdata->pm_caps)
+	if (host->pdata->pm_caps) {
 		mmc->pm_caps = host->pdata->pm_caps;
+		mmc->pm_flags = mmc->pm_caps;
+	}
 
 	if (host->dev->of_node) {
 		ctrl_id = of_alias_get_id(host->dev->of_node, "mshc");
@@ -2768,6 +2792,12 @@ static struct dw_mci_board *dw_mci_parse_dt(struct dw_mci *host)
 
 	if (of_find_property(np, "supports-highspeed", NULL))
 		pdata->caps |= MMC_CAP_SD_HIGHSPEED | MMC_CAP_MMC_HIGHSPEED;
+
+	if (of_find_property(np, "pm-ignore-notify", NULL))
+		pdata->pm_caps |= MMC_PM_IGNORE_PM_NOTIFY;
+
+	if (of_find_property(np, "powered-resumed-nonremovable-card", NULL))
+		pdata->pm_caps |= MMC_PM_IGNORE_REINIT_SDIO;
 
 	if (of_find_property(np, "cd-type-external", NULL)) {
 		pdata->cd_type = DW_MCI_CD_EXTERNAL;

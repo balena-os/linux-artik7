@@ -110,13 +110,18 @@ struct hdmi_res_mode {
 	char *name;
 };
 
+enum color_range {
+	AVI_FULL_RANGE = 0,
+	AVI_LIMITED_RANGE
+};
+
 struct hdmi_preset {
 	struct hdmi_res_mode mode;
 	enum hdmi_picture_aspect aspect_ratio;
 	struct hdmi_reg_core core;
 	struct hdmi_reg_tg tg;
 	bool dvi_mode;
-	int color_range;
+	enum color_range  color_range;
 	u8 vic;
 };
 
@@ -188,7 +193,7 @@ enum HDMI_AUDIO_CODEC {
 extern const struct hdmi_conf hdmi_conf[];
 extern const int num_hdmi_presets;
 
-int nx_soc_dp_hdmi_register(struct device *dev,
+int nx_dp_device_hdmi_register(struct device *dev,
 			struct device_node *np, struct dp_control_dev *dpc);
 
 u32  nx_dp_hdmi_hpd_event(int irq);
@@ -198,8 +203,10 @@ bool nx_dp_hdmi_mode_get(int width, int height, int refresh,
 			struct videomode *vm);
 int nx_dp_hdmi_mode_set(struct nx_drm_device *display,
 			struct drm_display_mode *mode, struct videomode *vm,
-			bool dvi_mode);
+			bool dvi_mode, int q_range);
 int  nx_dp_hdmi_mode_commit(struct nx_drm_device *display, int crtc);
 void nx_dp_hdmi_power(struct nx_drm_device *display, bool on);
+int nx_dp_hdmi_resume(struct nx_drm_device *display);
+int nx_dp_hdmi_suspend(struct nx_drm_device *display);
 
 #endif

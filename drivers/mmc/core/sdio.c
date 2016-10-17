@@ -374,7 +374,11 @@ static unsigned mmc_sdio_get_max_clock(struct mmc_card *card)
 		 * high-speed, but it seems that 50 MHz is
 		 * mandatory.
 		 */
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+		max_dtr = 52000000;
+#else
 		max_dtr = 50000000;
+#endif
 	} else {
 		max_dtr = card->cis.max_dtr;
 	}
@@ -968,7 +972,8 @@ static int mmc_sdio_resume(struct mmc_host *host)
 	}
 
 	/* No need to reinitialize powered-resumed nonremovable cards */
-	if (mmc_card_is_removable(host) || !mmc_card_keep_power(host)) {
+	if (!(host->pm_caps & MMC_PM_IGNORE_REINIT_SDIO) &&
+		(mmc_card_is_removable(host) || !mmc_card_keep_power(host))) {
 		sdio_reset(host);
 		mmc_go_idle(host);
 		mmc_send_if_cond(host, host->card->ocr);

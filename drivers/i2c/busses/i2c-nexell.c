@@ -32,7 +32,6 @@
 #include <linux/clk.h>
 #include <linux/gpio.h>
 
-#include <linux/soc/nexell/s5pxx18-gpio.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_gpio.h>
@@ -96,8 +95,10 @@ struct nx_i2c_param {
 	int running;
 	unsigned int trans_status;
 	struct pinctrl *pctrl;
-	struct pinctrl_state	*pins_dft_mode;
-	struct pinctrl_state	*pins_gpio_mode;
+	struct pinctrl_state	*pins_sda_dft;
+	struct pinctrl_state	*pins_scl_dft;
+	struct pinctrl_state	*pins_sda_gpio;
+	struct pinctrl_state	*pins_scl_gpio;
 	/* test */
 	int irq_count;
 	int thd_count;
@@ -210,6 +211,7 @@ static int nx_i2c_stop_scl(struct nx_i2c_param *par)
 
 	gpio_direction_input(gpio);
 	if (!gpio_get_value(gpio)) {
+		pinctrl_select_state(par->pctrl, par->pins_scl_gpio);
 		gpio_direction_output(gpio, 1);
 		start = jiffies;
 		while (!gpio_get_value(gpio)) {
@@ -224,6 +226,7 @@ static int nx_i2c_stop_scl(struct nx_i2c_param *par)
 	}
 
 _stop_timeout:
+	pinctrl_select_state(par->pctrl, par->pins_scl_dft);
 	return ret;
 }
 
@@ -237,24 +240,26 @@ static inline void nx_i2c_stop_dev(struct nx_i2c_param *par, int nostop,
 
 	spin_lock_irqsave(&par->lock, flags);
 	if (!nostop) {
-		pinctrl_select_state(par->pctrl, par->pins_gpio_mode);
+		pinctrl_select_state(par->pctrl, par->pins_sda_gpio);
 		gpio_direction_output(par->hw.sda_io, 0); /* SDA LOW */
 		udelay(delay);
 		nx_i2c_stop_scl(par);
 		udelay(delay);
 		gpio_set_value(par->hw.sda_io, 1);	/* STOP Signal Gen */
-		pinctrl_select_state(par->pctrl, par->pins_dft_mode);
+		pinctrl_select_state(par->pctrl, par->pins_sda_dft);
 	} else {
-		pinctrl_select_state(par->pctrl, par->pins_gpio_mode);
-		gpio_direction_output(par->hw.sda_io, 1); /* SDA LOW */
+		pinctrl_select_state(par->pctrl, par->pins_sda_gpio);
+		gpio_direction_output(par->hw.sda_io, 1); /* SDA HIGH */
 		udelay(delay);
-		gpio_direction_output(par->hw.scl_io, 1); /* SDA LOW */
+		pinctrl_select_state(par->pctrl, par->pins_scl_gpio);
+		gpio_direction_output(par->hw.scl_io, 1); /* SCL HIGH */
 		ICSR = par->trans_mode << ICSR_MOD_SEL_POS;
 		writel(ICSR, (base+I2C_ICSR_OFFS));
 
 		ICCR = (1<<ICCR_IRQ_CLR_POS);
 		writel(ICCR, (base+I2C_ICCR_OFFS));
-		pinctrl_select_state(par->pctrl, par->pins_dft_mode);
+		pinctrl_select_state(par->pctrl, par->pins_sda_dft);
+		pinctrl_select_state(par->pctrl, par->pins_scl_dft);
 	}
 	spin_unlock_irqrestore(&par->lock, flags);
 }
@@ -744,10 +749,14 @@ static int nx_i2c_probe(struct platform_device *pdev)
 
 	par->pctrl = devm_pinctrl_get(&pdev->dev);
 
-	par->pins_dft_mode = pinctrl_lookup_state(par->pctrl, "default");
-	par->pins_gpio_mode = pinctrl_lookup_state(par->pctrl, "mode_gpio");
+	par->pins_sda_dft = pinctrl_lookup_state(par->pctrl, "sda_dft");
+	par->pins_scl_dft = pinctrl_lookup_state(par->pctrl, "scl_dft");
+	par->pins_sda_gpio = pinctrl_lookup_state(par->pctrl, "sda_gpio");
+	par->pins_scl_gpio = pinctrl_lookup_state(par->pctrl, "scl_gpio");
 
-	ret = pinctrl_select_state(par->pctrl, par->pins_dft_mode);
+	pinctrl_select_state(par->pctrl, par->pins_sda_dft);
+	pinctrl_select_state(par->pctrl, par->pins_scl_dft);
+
 	if (ret < 0) {
 		dev_err(&pdev->dev, "can't set state for dft mode\n");
 		return ret;
@@ -768,7 +777,6 @@ static int nx_i2c_probe(struct platform_device *pdev)
 static int nx_i2c_remove(struct platform_device *pdev)
 {
 	struct nx_i2c_param *par = platform_get_drvdata(pdev);
-	int irq = par->hw.irqno;
 #ifdef CONFIG_RESET_CONTROLLER
 	struct reset_control *rst;
 
@@ -804,7 +812,8 @@ static int nx_i2c_resume(struct platform_device *pdev)
 #endif
 
 	dev_dbg(&pdev->dev, "%s\n", __func__);
-	pinctrl_select_state(par->pctrl, par->pins_dft_mode);
+	pinctrl_select_state(par->pctrl, par->pins_sda_dft);
+	pinctrl_select_state(par->pctrl, par->pins_scl_dft);
 #ifdef CONFIG_RESET_CONTROLLER
 	rst = devm_reset_control_get(&pdev->dev, "i2c-reset");
 

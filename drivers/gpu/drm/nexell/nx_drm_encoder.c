@@ -19,6 +19,11 @@
 #include <drm/drm_crtc_helper.h>
 #include <linux/of_address.h>
 
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+#include <linux/pm_qos.h>
+#include <linux/soc/nexell/cpufreq.h>
+#endif
+
 #include "nx_drm_drv.h"
 #include "nx_drm_crtc.h"
 #include "nx_drm_encoder.h"
@@ -30,9 +35,22 @@
 		dpc->module = p;	\
 	}
 
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+static struct pm_qos_request nx_disp_qos;
+
+static void nx_disp_qos_update(int val)
+{
+	if (!pm_qos_request_active(&nx_disp_qos))
+		pm_qos_add_request(&nx_disp_qos, PM_QOS_BUS_THROUGHPUT, val);
+	else
+		pm_qos_update_request(&nx_disp_qos, val);
+}
+#endif
+
 static void nx_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
 {
-	struct nx_drm_device *display = to_nx_encoder(encoder)->display;
+	struct nx_drm_encoder *nx_encoder = to_nx_encoder(encoder);
+	struct nx_drm_device *display = nx_encoder->display;
 	struct nx_drm_panel *panel = &display->panel;
 	struct nx_drm_ops *ops = display->ops;
 
@@ -41,26 +59,35 @@ static void nx_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
 		dp_panel_type_name(dp_panel_get_type(display)),
 		mode, panel->is_connected ? "connected" : "disconnected");
 
-	if (!panel->is_connected)
-		return;
-
-	if (to_nx_encoder(encoder)->dpms == mode) {
+	if (nx_encoder->dpms == mode) {
 		DRM_DEBUG_KMS("desired dpms mode is same as previous one.\n");
 		return;
 	}
 
 	switch (mode) {
 	case DRM_MODE_DPMS_ON:
-		nx_drm_dp_encoder_dpms(encoder, true);
-		if (ops && ops->dpms)
-			ops->dpms(display->dev, mode);
+		if (panel->is_connected) {
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+			nx_disp_qos_update(NX_BUS_CLK_DISP_KHZ);
+#endif
+			nx_drm_dp_encoder_dpms(encoder, true);
+			if (ops && ops->dpms)
+				ops->dpms(display->dev, mode);
+			nx_encoder->enabled = true;
+		}
 		break;
 	case DRM_MODE_DPMS_STANDBY:
 	case DRM_MODE_DPMS_SUSPEND:
 	case DRM_MODE_DPMS_OFF:
-		if (ops && ops->dpms)
+		if (nx_encoder->enabled) {
+			if (ops && ops->dpms)
 				ops->dpms(display->dev, mode);
-		nx_drm_dp_encoder_dpms(encoder, false);
+			nx_drm_dp_encoder_dpms(encoder, false);
+			nx_encoder->enabled = false;
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+			nx_disp_qos_update(NX_BUS_CLK_IDLE_KHZ);
+#endif
+		}
 		break;
 
 	default:
@@ -68,7 +95,7 @@ static void nx_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
 		break;
 	}
 
-	to_nx_encoder(encoder)->dpms = mode;
+	nx_encoder->dpms = mode;
 	DRM_DEBUG_KMS("done\n");
 }
 
@@ -176,14 +203,13 @@ static struct drm_encoder_funcs nx_encoder_funcs = {
 };
 
 struct drm_encoder *nx_drm_encoder_create(struct drm_device *drm,
-			struct nx_drm_device *display, int type,
+			struct nx_drm_device *display, int enc_type,
 			int pipe, int possible_crtcs, void *context)
 {
 	struct nx_drm_encoder *nx_encoder;
 	struct drm_encoder *encoder;
 
-	DRM_DEBUG_KMS("enter possible crtcs:0x%x\n",
-		possible_crtcs);
+	DRM_DEBUG_KMS("enter pipe.%d crtc mask:0x%x\n", pipe, possible_crtcs);
 
 	BUG_ON(!display || 0 == possible_crtcs);
 
@@ -200,7 +226,7 @@ struct drm_encoder *nx_drm_encoder_create(struct drm_device *drm,
 	encoder = &nx_encoder->encoder;
 	encoder->possible_crtcs = possible_crtcs;
 
-	drm_encoder_init(drm, encoder, &nx_encoder_funcs, type);
+	drm_encoder_init(drm, encoder, &nx_encoder_funcs, enc_type);
 	drm_encoder_helper_add(encoder, &nx_encoder_helper_funcs);
 
 	DRM_DEBUG_KMS("exit, encoder id:%d\n", encoder->base.id);

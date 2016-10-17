@@ -529,7 +529,7 @@ static int sensor_4ec_i2c_write(struct i2c_client *client,
 	u8 *buf, u32 size)
 {
 	int ret = 0;
-	int retry_count = 5;
+	int retry_count = 1;
 	struct i2c_msg msg = {client->addr, 0, size, buf};
 
 	do {
@@ -550,7 +550,7 @@ static int sensor_4ec_i2c_write(struct i2c_client *client,
 static int sensor_4ec_i2c_write16(struct i2c_client *client,
 		u16 addr, u16 w_data)
 {
-	int retry_count = 5;
+	int retry_count = 1;
 	unsigned char buf[4];
 	struct i2c_msg msg = {client->addr, 0, 4, buf};
 	int ret = 0;
@@ -852,7 +852,11 @@ static int sensor_4ec_read_reg(struct v4l2_subdev *subdev,
 	mutex_lock(&s5k4ec_state->i2c_lock);
 
 	/* Enter read mode */
-	sensor_4ec_i2c_write16(client, 0x002C, 0x7000);
+	ret = sensor_4ec_i2c_write16(client, 0x002C, 0x7000);
+	if (unlikely(ret < 0)) {
+		cam_err("write reg fail(%d)", ret);
+		goto write_err;
+	}
 
 	for (i = 0; i < regset->array_size[set_idx]; i++) {
 		addr = (regset->reg[set_idx][i] & 0xFFFF0000) >> 16;
@@ -877,6 +881,7 @@ static int sensor_4ec_read_reg(struct v4l2_subdev *subdev,
 p_err:
 	/* restore write mode */
 	sensor_4ec_i2c_write16(client, 0x0028, 0x7000);
+write_err:
 	mutex_unlock(&s5k4ec_state->i2c_lock);
 	return ret;
 }
@@ -1754,7 +1759,6 @@ static int sensor_4ec_init(struct v4l2_subdev *subdev, u32 val)
 	}
 #endif
 
-	s5k4ec_state->mode = S5K4EC_OPRMODE_VIDEO;
 	s5k4ec_state->sensor_mode = SENSOR_CAMERA;
 	s5k4ec_state->contrast = CONTRAST_DEFAULT;
 	s5k4ec_state->effect = IMAGE_EFFECT_NONE;
@@ -1813,7 +1817,7 @@ p_err:
 static int sensor_4ec_set_size(struct v4l2_subdev *subdev)
 {
 	int ret = 0;
-	struct s5k4ec_framesize *size;
+	const struct s5k4ec_framesize *size;
 	struct s5k4ec_state *s5k4ec_state;
 
 	cam_dbg("E\n");
@@ -1857,7 +1861,7 @@ static int sensor_4ec_s_format(struct v4l2_subdev *subdev,
 {
 	int ret = 0;
 	struct s5k4ec_state *s5k4ec_state;
-	struct s5k4ec_framesize *size;
+	const struct s5k4ec_framesize *size;
 	u32 i;
 
 	BUG_ON(!subdev);
@@ -1877,6 +1881,11 @@ static int sensor_4ec_s_format(struct v4l2_subdev *subdev,
 	s5k4ec_state->fmt.code = fmt->code;
 
 	size = NULL;
+
+	if (fmt->width > 1920 && fmt->height > 1080)
+		s5k4ec_state->mode = S5K4EC_OPRMODE_IMAGE;
+	else
+		s5k4ec_state->mode = S5K4EC_OPRMODE_VIDEO;
 
 	if (s5k4ec_state->mode == S5K4EC_OPRMODE_IMAGE) {
 		cam_info("for capture\n");
@@ -3248,7 +3257,6 @@ static int sensor_4ec_set_framerate(struct v4l2_subdev *subdev)
 	sensor_4ec_i2c_write16(client, 0x0F12, frametime);
 	sensor_4ec_i2c_write16(client, 0x0F12, frametime);
 
-p_err:
 	return ret;
 }
 
@@ -3635,6 +3643,7 @@ int sensor_4ec_probe(struct i2c_client *client,
 	INIT_WORK(&s5k4ec_state->af_stop_work, sensor_4ec_af_stop_worker);
 
 	s5k4ec_state->fps = FRAME_RATE_30; /* default frame rate */
+	s5k4ec_state->mode = S5K4EC_OPRMODE_VIDEO;
 
 p_err:
 	cam_info("(%d)\n", ret);

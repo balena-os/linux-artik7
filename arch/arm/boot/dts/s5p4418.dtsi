@@ -111,6 +111,20 @@
 		status = "disabled";
 	};
 
+	busqos {
+		compatible = "nexell,s5p4418-busqos";
+		reg = <PHYS_BASE_DREX 0x1000>;
+
+		drex_s0_qos_enable = <0>;
+		drex_s1_qos_enable = <1>;
+		drex_s0_qos_thres = <0x1>;
+		drex_s1_qos_thres = <0xf>;
+		drex_s0_qos_tout = <0x100>;
+		drex_s1_qos_tout = <0x0>;
+
+		status = "okay";
+	};
+
 	soc {
 		compatible = "simple-bus";
 		#address-cells = <1>;
@@ -294,9 +308,12 @@
 			reset-names = "i2c-reset";
 			gpios = <&gpio_d 3 0 /* sda */
 				&gpio_d 2 0 /* scl */>;
-			pinctrl-names = "default", "mode_gpio";
-			pinctrl-0 = <&i2c0_pin>;
-			pinctrl-1 = <&i2c0_pin_gpio>;
+			pinctrl-names = "sda_dft", "scl_dft", "sda_gpio",
+			    "scl_gpio";
+			pinctrl-0 = <&i2c0_sda_pin>;
+			pinctrl-1 = <&i2c0_scl_pin>;
+			pinctrl-2 = <&i2c0_pin_sda_gpio>;
+			pinctrl-3 = <&i2c0_pin_scl_gpio>;
 			status = "disabled";
 		};
 
@@ -310,9 +327,12 @@
 			reset-names = "i2c-reset";
 			gpios = <&gpio_d 5 0 /* sda */
 				&gpio_d 4 0 /* scl */>;
-			pinctrl-names = "default", "mode_gpio";
-			pinctrl-0 = <&i2c1_pin>;
-			pinctrl-1 = <&i2c1_pin_gpio>;
+			pinctrl-names = "sda_dft", "scl_dft", "sda_gpio",
+			    "scl_gpio";
+			pinctrl-0 = <&i2c1_sda_pin>;
+			pinctrl-1 = <&i2c1_scl_pin>;
+			pinctrl-2 = <&i2c1_pin_sda_gpio>;
+			pinctrl-3 = <&i2c1_pin_scl_gpio>;
 			status = "disabled";
 		};
 
@@ -326,9 +346,12 @@
 			reset-names = "i2c-reset";
 			gpios = <&gpio_d 7 0 /* sda */
 				&gpio_d 6 0 /* scl */>;
-			pinctrl-names = "default", "mode_gpio";
-			pinctrl-0 = <&i2c2_pin>;
-			pinctrl-1 = <&i2c2_pin_gpio>;
+			pinctrl-names = "sda_dft", "scl_dft", "sda_gpio",
+			    "scl_gpio";
+			pinctrl-0 = <&i2c2_sda_pin>;
+			pinctrl-1 = <&i2c2_scl_pin>;
+			pinctrl-2 = <&i2c2_pin_sda_gpio>;
+			pinctrl-3 = <&i2c2_pin_scl_gpio>;
 			status = "disabled";
 		};
 
@@ -708,8 +731,9 @@
 			interrupts = <IRQ_DPC_P>, <IRQ_DPC_S>;
 			interrupts-names = "dpc.0", "dpc.1";
 
-			resets = <&nexell_reset RESET_ID_DISPLAY>;
-			reset-names = "rsc-display";
+			resets = <&nexell_reset RESET_ID_DISPLAY>,
+					<&nexell_reset RESET_ID_DISP_TOP>;
+			reset-names = "rsc-display", "rsc-display-top";
 
 			status = "disabled";
 
@@ -741,7 +765,7 @@
 			status = "disabled";
 
 			dp-resource {
-				reg_base = <0xc010a000>;
+				reg_base = <0xc010a000 0x100>;
 				clk_base = <0xc0108000 3>;
 				resets = <&nexell_reset RESET_ID_LVDS>;
 				reset-names = "rsc-lvds-phy";
@@ -758,7 +782,7 @@
 			status = "disabled";
 
 			dp-resource {
-				reg_base = <0xc00d0000>;
+				reg_base = <0xc00d0000 0x100>;
 				clk_base = <0xc0105000 2>;
 
 				resets = <&nexell_reset RESET_ID_MIPI>,
@@ -794,6 +818,47 @@
 						"rsc-hdmi-tmds", "rsc-hdmi", "rsc-hdmi-phy";
 				soc,tieoff = <NX_TIEOFF_DISPLAYTOP0_i_HDMI_PHY_REFCLK_SEL 1>;
 			};
+		};
+
+		scaler@c0066000 {
+			compatible = "nexell,scaler";
+			reg = <PHYS_BASE_SCALER 0x1000>;
+			interrupts = <IRQ_SCALER>;
+			clock-names = "scaler";
+			clocks = <&scaler>;
+			reset-names = "scaler-reset";
+			resets = <&nexell_reset RESET_ID_SCALER>;
+			status = "disabled";
+		};
+
+		gpu@c0070000 {
+			compatible = "arm,mali-400", "arm,mali-utgard";
+			reg = <PHYS_BASE_VR 0x10000>;
+			interrupts = <IRQ_VR>, <IRQ_VR>, <IRQ_VR>,
+				   <IRQ_VR>, <IRQ_VR>, <IRQ_VR>, <IRQ_VR>;
+			interrupt-names = "IRQGP", "IRQGPMMU", "IRQPP0",
+				"IRQPPMMU0", "IRQPP1", "IRQPPMMU1", "IRQPMU";
+			pmu_domain_config = <0x1 0x4 0x8 0x0 0x0 0x0 0x0 0x0
+						0x0 0x2 0x0 0x0>;
+			pmu_switch_delay = <0xff>;
+			clocks = <&vr>;
+			clock-names = "clk_mali";
+			resets = <&nexell_reset RESET_ID_VR>;
+			reset-names = "vr-reset";
+		};
+
+		video-codec@c0080000 {
+			compatible = "nexell, nx-vpu";
+			reg = <0xc0080000 0x4000>;
+			interrupts = <IRQ_CODA960_HOST>,
+				<IRQ_CODA960_JPG>;
+			resets = <&nexell_reset RESET_ID_CODA_A>,
+				<&nexell_reset RESET_ID_CODA_P>,
+				<&nexell_reset RESET_ID_CODA_C>;
+			reset-names = "vpu-a-reset", "vpu-p-reset",
+				"vpu-c-reset";
+			clocks = <&pclk>, <&bclk>;
+			status = "disabled";
 		};
 	}; /*** soc ***/
 };

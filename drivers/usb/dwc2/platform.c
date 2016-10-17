@@ -48,15 +48,6 @@
 #include "core.h"
 #include "hcd.h"
 
-/* FIXME : temporarily patch code for otg vbus gpio control
- * using gpio and pmic.
- */
-#ifdef CONFIG_GPIOLIB
-#include <linux/of_gpio.h>
-#include <linux/gpio.h>
-#include <linux/gpio/consumer.h>
-#endif
-
 #ifdef CONFIG_RESET_CONTROLLER
 #include <linux/reset.h>
 #endif
@@ -261,27 +252,18 @@ static int dwc2_driver_probe(struct platform_device *dev)
 	if (of_device_is_compatible(dev->dev.of_node,
 				    "nexell,nexell-dwc2otg")) {
 #ifdef CONFIG_GPIOLIB
-		/* FIXME : temporarily patch code for otg vbus gpio control
-		 * using gpio and pmic.
-		 */
-		unsigned io;
-
-		io = of_get_named_gpio(dev->dev.of_node, "gpios", 0);
-		if (gpio_is_valid(io)) {
-			retval = devm_gpio_request(&dev->dev, io, "otg_vbus");
+		hsotg->ext_vbus_io = of_get_named_gpio(dev->dev.of_node,
+						       "gpios", 0);
+		if (gpio_is_valid(hsotg->ext_vbus_io)) {
+			retval = devm_gpio_request_one(&dev->dev,
+						   hsotg->ext_vbus_io,
+						   GPIOF_OUT_INIT_LOW,
+						   "otg_vbus");
 
 			if (retval < 0) {
 				dev_err(&dev->dev,
 					"can't request otg_vbus gpio %d\n",
-					io);
-				return 0;
-			}
-
-			retval = gpio_direction_output(io, 1);
-			if (retval < 0) {
-				dev_err(&dev->dev,
-					"can't request output direction");
-				dev_err(&dev->dev, "otg_vbus gpio %d\n", io);
+					hsotg->ext_vbus_io);
 				return 0;
 			}
 		}
@@ -351,8 +333,11 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 	if (dwc2_is_device_mode(dwc2)) {
 		ret = s3c_hsotg_suspend(dwc2);
 	} else {
-		if (dwc2->lx_state == DWC2_L0)
-			return 0;
+		if (!of_device_is_compatible(dev->of_node,
+				    "nexell,nexell-dwc2otg")) {
+			if (dwc2->lx_state == DWC2_L0)
+				return 0;
+		}
 		phy_exit(dwc2->phy);
 		phy_power_off(dwc2->phy);
 
@@ -365,24 +350,32 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
 	int ret = 0;
 
-	if (dwc2_is_device_mode(dwc2)) {
-		ret = s3c_hsotg_resume(dwc2);
-	} else {
-		if (of_device_is_compatible(dev->of_node,
-					    "nexell,nexell-dwc2otg")) {
+	if (of_device_is_compatible(dev->of_node,
+				    "nexell,nexell-dwc2otg")) {
 #ifdef CONFIG_RESET_CONTROLLER
-			struct reset_control *rst;
+		struct reset_control *rst;
 
-			rst = devm_reset_control_get(dev, "usbotg-reset");
-			if (!IS_ERR(rst)) {
-				if (reset_control_status(rst))
-					reset_control_reset(rst);
-			}
-#endif
+		rst = devm_reset_control_get(dev, "usbotg-reset");
+		if (!IS_ERR(rst)) {
+			if (reset_control_status(rst))
+				reset_control_reset(rst);
 		}
-		phy_power_on(dwc2->phy);
-		phy_init(dwc2->phy);
+#endif
+		if ((dwc2_is_device_mode(dwc2)) &&
+		    (readl(dwc2->regs + GOTGCTL) & GOTGCTL_CONID_B))
+				ret = s3c_hsotg_resume(dwc2);
+		else {
+			phy_power_on(dwc2->phy);
+			phy_init(dwc2->phy);
+		}
+	} else {
+		if (dwc2_is_device_mode(dwc2))
+			ret = s3c_hsotg_resume(dwc2);
+		else {
+			phy_power_on(dwc2->phy);
+			phy_init(dwc2->phy);
 
+		}
 	}
 	return ret;
 }

@@ -26,7 +26,7 @@
 #include <linux/of_graph.h>
 #include <linux/of_gpio.h>
 #include <video/of_display_timing.h>
-
+#include <dt-bindings/gpio/gpio.h>
 #include <drm/nexell_drm.h>
 
 #include "nx_drm_drv.h"
@@ -48,12 +48,13 @@ struct mipi_resource {
 struct lcd_context {
 	struct drm_connector *connector;
 	int crtc_pipe;
-	struct reset_control *reset;
-	void *base;
+	unsigned int possible_crtcs_mask;
 	struct nx_drm_device *display;
 	struct mutex lock;
 	bool local_timing;
-	struct gpio_desc *enable_gpio;
+	struct gpio_descs *enable_gpios;
+	enum of_gpio_flags gpios_active[4];
+	int gpios_delay[4];
 	struct mipi_resource mipi_res;
 };
 
@@ -203,6 +204,10 @@ static void panel_lcd_enable(struct device *dev, struct drm_panel *panel)
 {
 	struct lcd_context *ctx = dev_get_drvdata(dev);
 	struct nx_drm_device *display = ctx->display;
+	bool suspended = display->suspended;
+
+	if (suspended)
+		nx_drm_dp_panel_res_resume(dev, display);
 
 	nx_drm_dp_lcd_prepare(display, panel);
 	drm_panel_prepare(panel);
@@ -215,10 +220,16 @@ static void panel_lcd_disable(struct device *dev, struct drm_panel *panel)
 {
 	struct lcd_context *ctx = dev_get_drvdata(dev);
 	struct nx_drm_device *display = ctx->display;
+	bool suspend = display->suspended;
 
+	if (suspend)
+		nx_drm_dp_panel_res_suspend(dev, display);
+
+	/* panel disable */
 	drm_panel_unprepare(panel);
 	drm_panel_disable(panel);
 
+	/* control disable */
 	nx_drm_dp_lcd_unprepare(display, panel);
 	nx_drm_dp_lcd_disable(display, panel);
 }
@@ -228,14 +239,31 @@ static void panel_lcd_dmps(struct device *dev, int mode)
 	struct lcd_context *ctx = dev_get_drvdata(dev);
 	struct nx_drm_panel *panel = &ctx->display->panel;
 	struct drm_panel *drm_panel = panel->panel;
+	struct gpio_desc **desc;
+	int i;
 
 	DRM_DEBUG_KMS("dpms.%d\n", mode);
+
 	switch (mode) {
 	case DRM_MODE_DPMS_ON:
 		panel_lcd_enable(dev, drm_panel);
 
-		if (!panel && ctx->enable_gpio)
-			gpiod_set_value_cansleep(ctx->enable_gpio, 1);
+		if (ctx->enable_gpios) {
+			desc = ctx->enable_gpios->desc;
+			for (i = 0; ctx->enable_gpios->ndescs > i; i++) {
+				DRM_DEBUG_KMS("LCD gpio.%d ative %s %dms\n",
+					desc_to_gpio(desc[i]),
+					ctx->gpios_active[i] == GPIO_ACTIVE_HIGH
+					? "high" : "low ",
+					ctx->gpios_delay[i]);
+
+				gpiod_set_value_cansleep(desc[i],
+						ctx->gpios_active[i] ==
+						GPIO_ACTIVE_HIGH ? 1 : 0);
+				if (ctx->gpios_delay[i])
+					mdelay(ctx->gpios_delay[i]);
+			}
+		}
 		break;
 
 	case DRM_MODE_DPMS_STANDBY:
@@ -243,8 +271,13 @@ static void panel_lcd_dmps(struct device *dev, int mode)
 	case DRM_MODE_DPMS_OFF:
 		panel_lcd_disable(dev, drm_panel);
 
-		if (!panel && ctx->enable_gpio)
-			gpiod_set_value_cansleep(ctx->enable_gpio, 0);
+		if (ctx->enable_gpios) {
+			desc = ctx->enable_gpios->desc;
+			for (i = 0; ctx->enable_gpios->ndescs > i; i++)
+				gpiod_set_value_cansleep(desc[i],
+						ctx->gpios_active[i] ==
+						GPIO_ACTIVE_HIGH ? 0 : 1);
+		}
 		break;
 	default:
 		DRM_ERROR("fail : unspecified mode %d\n", mode);
@@ -317,12 +350,14 @@ static int panel_lcd_bind(struct device *dev,
 	struct platform_driver *pdrv = to_platform_driver(dev->driver);
 	enum dp_panel_type panel_type = dp_panel_get_type(ctx->display);
 	int pipe = ctx->crtc_pipe;
+	unsigned int possible_crtcs = ctx->possible_crtcs_mask;
 	int err = 0;
 
 	DRM_INFO("Bind %s panel\n", dp_panel_type_name(panel_type));
 
 	ctx->connector = nx_drm_connector_create_and_attach(drm,
-			ctx->display, pipe, panel_type, ctx);
+					ctx->display, pipe, possible_crtcs,
+					panel_type, ctx);
 	if (IS_ERR(ctx->connector))
 		goto err_bind;
 
@@ -397,6 +432,11 @@ static int panel_lcd_parse_dt(struct platform_device *pdev,
 	parse_read_prop(node, "crtc-pipe", ctx->crtc_pipe);
 
 	/*
+	 * get possible crtcs
+	 */
+	parse_read_prop(node, "crtcs-possible-mask", ctx->possible_crtcs_mask);
+
+	/*
 	 * parse panel output for RGB/LVDS/MiPi-DSI
 	 */
 	err = nx_drm_dp_panel_dev_register(dev, node, panel_type, display);
@@ -409,15 +449,53 @@ static int panel_lcd_parse_dt(struct platform_device *pdev,
 	np = of_graph_get_remote_port_parent(node);
 	panel->panel_node = np;
 	if (!np) {
+		struct gpio_descs *gpios;
+		struct gpio_desc **desc;
+		int i, ngpios = 0;
+
 		DRM_INFO("not use remote panel node (%s) !\n",
 			node->full_name);
 
-		/*
-		 * parse panel info
-		 */
-		ctx->enable_gpio =
-			devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
+		/* parse panel gpios */
+		gpios = devm_gpiod_get_array(dev, "enable", GPIOD_ASIS);
+		if (-EBUSY == (long)ERR_CAST(gpios)) {
+			DRM_INFO("fail : enable-gpios is busy : %s !!!\n",
+				node->full_name);
+			gpios = NULL;
+		}
 
+		if (!IS_ERR(gpios) && gpios) {
+			ngpios = gpios->ndescs;
+			desc = gpios->desc;
+			ctx->enable_gpios = gpios;	/* set enable_gpios */
+			of_property_read_u32_array(node,
+				"enable-gpios-delay", ctx->gpios_delay,
+				(ngpios-1));
+		}
+
+		for (i = 0; ngpios > i; i++) {
+			enum of_gpio_flags flags;
+			int gpio;
+
+			gpio = of_get_named_gpio_flags(node,
+						"enable-gpios", i, &flags);
+			if (!gpio_is_valid(gpio)) {
+				DRM_ERROR("invalid gpio #%d: %d\n", i, gpio);
+				return -EINVAL;
+			}
+
+			ctx->gpios_active[i] = flags;
+
+			/* disable at boottime */
+			gpiod_direction_output(desc[i],
+					flags == GPIO_ACTIVE_HIGH ? 0 : 1);
+
+			DRM_INFO("LCD enable-gpio.%d act %s\n",
+				gpio, flags == GPIO_ACTIVE_HIGH ?
+				"high" : "low ");
+		}
+
+		/* parse panel lcd size */
 		parse_read_prop(node, "width-mm", panel->width_mm);
 		parse_read_prop(node, "height-mm", panel->height_mm);
 
@@ -455,7 +533,6 @@ static int panel_lcd_driver_setup(struct platform_device *pdev,
 	const struct of_device_id *id;
 	enum dp_panel_type type;
 	struct device *dev = &pdev->dev;
-	struct device_node *node = dev->of_node;
 	struct nx_drm_res *res = &ctx->display->res;
 	int err;
 
@@ -467,11 +544,7 @@ static int panel_lcd_driver_setup(struct platform_device *pdev,
 
 	DRM_INFO("Load %s panel\n", dp_panel_type_name(type));
 
-	err = nx_drm_dp_panel_drv_res_parse(dev, &ctx->base, &ctx->reset);
-	if (0 > err)
-		return -EINVAL;
-
-	err = nx_drm_dp_panel_dev_res_parse(dev, node, res, type);
+	err = nx_drm_dp_panel_res_parse(dev, res, type);
 	if (0 > err)
 		return -EINVAL;
 
@@ -541,8 +614,7 @@ static int panel_lcd_remove(struct platform_device *pdev)
 	if (!ctx)
 		return 0;
 
-	nx_drm_dp_panel_dev_res_free(dev, &ctx->display->res);
-	nx_drm_dp_panel_drv_res_free(dev, ctx->base, ctx->reset);
+	nx_drm_dp_panel_res_free(dev, &ctx->display->res);
 	nx_drm_dp_panel_dev_release(dev, ctx->display);
 
 	devm_kfree(&pdev->dev, ctx);
