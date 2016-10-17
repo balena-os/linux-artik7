@@ -422,6 +422,8 @@ int mmc_of_parse(struct mmc_host *host)
 		host->caps |= MMC_CAP_POWER_OFF_CARD;
 	if (of_find_property(np, "cap-sdio-irq", &len))
 		host->caps |= MMC_CAP_SDIO_IRQ;
+	if (of_find_property(np, "cap-mmc-hw-reset", &len))
+		host->caps |= MMC_CAP_HW_RESET;
 	if (of_find_property(np, "full-pwr-cycle", &len))
 		host->caps2 |= MMC_CAP2_FULL_PWR_CYCLE;
 	if (of_find_property(np, "keep-power-in-suspend", &len))
@@ -550,7 +552,8 @@ int mmc_add_host(struct mmc_host *host)
 	mmc_host_clk_sysfs_init(host);
 
 	mmc_start_host(host);
-	register_pm_notifier(&host->pm_notify);
+	if (!(host->pm_flags & MMC_PM_IGNORE_PM_NOTIFY))
+		register_pm_notifier(&host->pm_notify);
 
 	return 0;
 }
@@ -567,7 +570,8 @@ EXPORT_SYMBOL(mmc_add_host);
  */
 void mmc_remove_host(struct mmc_host *host)
 {
-	unregister_pm_notifier(&host->pm_notify);
+	if (!(host->pm_flags & MMC_PM_IGNORE_PM_NOTIFY))
+		unregister_pm_notifier(&host->pm_notify);
 	mmc_stop_host(host);
 
 #ifdef CONFIG_DEBUG_FS

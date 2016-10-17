@@ -571,6 +571,17 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_MAX_PACKED_WRITES];
 		card->ext_csd.max_packed_reads =
 			ext_csd[EXT_CSD_MAX_PACKED_READS];
+
+		if(!(card->ext_csd.rst_n_function & EXT_CSD_RST_N_EN_MASK)) {
+			err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+				EXT_CSD_RST_N_FUNCTION,
+				card->ext_csd.rst_n_function | EXT_CSD_RST_N_ENABLED,
+				card->ext_csd.generic_cmd6_time);
+			if(!err)
+				card->ext_csd.rst_n_function |= EXT_CSD_RST_N_ENABLED;
+			else
+				err = 0;
+		}
 	} else {
 		card->ext_csd.data_sector_size = 512;
 	}
@@ -1783,17 +1794,6 @@ static int mmc_runtime_resume(struct mmc_host *host)
 	return 0;
 }
 
-static int mmc_power_restore(struct mmc_host *host)
-{
-	int ret;
-
-	mmc_claim_host(host);
-	ret = mmc_init_card(host, host->card->ocr, host->card);
-	mmc_release_host(host);
-
-	return ret;
-}
-
 int mmc_can_reset(struct mmc_card *card)
 {
 	u8 rst_n_function;
@@ -1808,7 +1808,6 @@ EXPORT_SYMBOL(mmc_can_reset);
 static int mmc_reset(struct mmc_host *host)
 {
 	struct mmc_card *card = host->card;
-	u32 status;
 
 	if (!(host->caps & MMC_CAP_HW_RESET) || !host->ops->hw_reset)
 		return -EOPNOTSUPP;
@@ -1821,17 +1820,11 @@ static int mmc_reset(struct mmc_host *host)
 
 	host->ops->hw_reset(host);
 
-	/* If the reset has happened, then a status command will fail */
-	if (!mmc_send_status(card, &status)) {
-		mmc_host_clk_release(host);
-		return -ENOSYS;
-	}
-
 	/* Set initial state and call mmc_set_ios */
 	mmc_set_initial_state(host);
 	mmc_host_clk_release(host);
 
-	return mmc_power_restore(host);
+	return mmc_init_card(host, card->ocr, card);
 }
 
 static const struct mmc_bus_ops mmc_ops = {
@@ -1841,7 +1834,6 @@ static const struct mmc_bus_ops mmc_ops = {
 	.resume = mmc_resume,
 	.runtime_suspend = mmc_runtime_suspend,
 	.runtime_resume = mmc_runtime_resume,
-	.power_restore = mmc_power_restore,
 	.alive = mmc_alive,
 	.shutdown = mmc_shutdown,
 	.reset = mmc_reset,

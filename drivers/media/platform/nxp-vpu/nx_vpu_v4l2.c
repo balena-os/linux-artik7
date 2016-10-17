@@ -36,6 +36,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+#include <linux/pm_qos.h>
 #include <linux/soc/nexell/cpufreq.h>
 #endif
 
@@ -49,6 +50,17 @@
 
 #define INFO_MSG		0
 
+#ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
+static struct pm_qos_request nx_vpu_qos;
+
+static void nx_vpu_qos_update(int val)
+{
+	if (!pm_qos_request_active(&nx_vpu_qos))
+		pm_qos_add_request(&nx_vpu_qos, PM_QOS_BUS_THROUGHPUT, val);
+	else
+		pm_qos_update_request(&nx_vpu_qos, val);
+}
+#endif
 
 dma_addr_t nx_vpu_mem_plane_addr(struct nx_vpu_ctx *c, struct vb2_buffer *v,
 				 unsigned int n)
@@ -937,7 +949,7 @@ static int nx_vpu_open(struct file *file)
 		dev->curr_ctx = ctx->idx;
 
 #ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
-		nx_bus_qos_update(NX_BUS_CLK_HIGH_KHZ);
+		nx_vpu_qos_update(NX_BUS_CLK_VPU_KHZ);
 #endif
 
 		NX_VPU_Clock(1);
@@ -997,7 +1009,7 @@ static int nx_vpu_close(struct file *file)
 		NX_VpuDeInit(dev);
 
 #ifdef CONFIG_ARM_S5Pxx18_DEVFREQ
-		nx_bus_qos_update(NX_BUS_CLK_LOW_KHZ);
+		nx_vpu_qos_update(NX_BUS_CLK_IDLE_KHZ);
 #endif
 	}
 #endif
@@ -1374,6 +1386,46 @@ static int nx_vpu_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static int nx_vpu_suspend(struct platform_device *pdev, pm_message_t state)
+{
+	struct nx_vpu_v4l2 *dev = platform_get_drvdata(pdev);
+
+	FUNC_IN();
+
+	mutex_lock(&dev->vpu_mutex);
+	NX_VPU_Clock(1);
+
+	NX_VpuSuspend(dev);
+
+#ifdef ENABLE_CLOCK_GATING
+	NX_VPU_Clock(0);
+#endif
+	mutex_unlock(&dev->vpu_mutex);
+
+	FUNC_OUT();
+	return 0;
+}
+
+static int nx_vpu_resume(struct platform_device *pdev)
+{
+	struct nx_vpu_v4l2 *dev = platform_get_drvdata(pdev);
+
+	FUNC_IN();
+
+	mutex_lock(&dev->vpu_mutex);
+	NX_VPU_Clock(1);
+
+	NX_VpuResume(dev, dev->regs_base);
+
+#ifdef ENABLE_CLOCK_GATING
+	NX_VPU_Clock(0);
+#endif
+	mutex_unlock(&dev->vpu_mutex);
+
+	FUNC_OUT();
+	return 0;
+}
+
 static struct platform_device_id nx_vpu_driver_ids[] = {
 	{
 		.name = NX_VIDEO_NAME, .driver_data = 0,
@@ -1392,6 +1444,8 @@ MODULE_DEVICE_TABLE(of, nx_vpu_dt_match);
 static struct platform_driver nx_vpu_driver = {
 	.probe = nx_vpu_probe,
 	.remove = nx_vpu_remove,
+	.suspend = nx_vpu_suspend,
+	.resume = nx_vpu_resume,
 	.id_table = nx_vpu_driver_ids,
 	.driver = {
 		.name = NX_VIDEO_NAME,

@@ -25,9 +25,10 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/suspend.h>
+#include <linux/pm_qos.h>
 
-/* Booting time 60s */
-#define BOOTING_TIME 600
+/* Booting time 90s */
+#define BOOTING_TIME 900
 
 static struct delayed_work hotplug_work;
 static struct delayed_work start_hotplug;
@@ -105,7 +106,7 @@ static struct hotplug_ctrl ctrl_hotplug = {
 	.up_freq = 1300000,			/* MHz */
 	.up_threshold = 3,
 	.down_threshold = 3,
-	.up_tasks = 8,
+	.up_tasks = 4,
 	.down_tasks = 6,
 	.force_hstate = -1,
 	.min_lock = -1,
@@ -118,7 +119,7 @@ static DEFINE_MUTEX(hotplug_lock);
 static DEFINE_SPINLOCK(hstate_status_lock);
 
 static atomic_t freq_history[STAY] =  {ATOMIC_INIT(0), ATOMIC_INIT(0)};
-static bool lcd_on = true;
+static bool lcd_on = false;
 
 /* check the core count */
 static int get_core_count(enum hstate state)
@@ -136,27 +137,35 @@ static int get_core_count(enum hstate state)
 
 static void __ref cluster_down(enum hstate state)
 {
+	struct device *cdev;
 	int i, count, cpu;
 
 	count = get_core_count(state);
 
 	for (i = 0; i < count; i++) {
 		cpu = num_online_cpus() - 1;
-		if (cpu > 0 && cpu_online(cpu))
+		if (cpu > 0 && cpu_online(cpu)) {
 			cpu_down(cpu);
+			cdev = get_cpu_device(cpu);
+			cdev->offline = true;
+		}
 	}
 }
 
 static void __ref cluster_up(enum hstate state)
 {
+	struct device *cdev;
 	int i, count, cpu;
 
 	count = get_core_count(state);
 
 	for (i = 0; i < count; i++) {
 		cpu = num_online_cpus();
-		if (cpu < num_possible_cpus() && !cpu_online(cpu))
+		if (cpu < num_possible_cpus() && !cpu_online(cpu)) {
 			cpu_up(cpu);
+			cdev = get_cpu_device(cpu);
+			cdev->offline = false;
+		}
 	}
 }
 
@@ -274,7 +283,12 @@ static enum action select_up_down(void)
 	nr = nr_running();
 
 	c0_freq = cpufreq_quick_get(0);	/* 0 : first cpu number for Cluster 0 */
-	c1_freq = cpufreq_quick_get(4); /* 4 : first cpu number for Cluster 1 */
+
+	/* 4 : first cpu number for Cluster 1 */
+	if (cpu_online(4))
+		c1_freq = cpufreq_quick_get(4);
+	else
+		c1_freq = c0_freq;
 
 	up_threshold = ctrl_hotplug.up_threshold;
 	down_threshold = ctrl_hotplug.down_threshold;
@@ -361,27 +375,14 @@ static int fb_state_change(struct notifier_block *nb,
 {
 	struct fb_event *evdata = data;
 	int *blank = evdata->data;
-	enum hstate target_state;
 
 	if (event == FB_EVENT_BLANK) {
 		switch (*blank) {
-		case FB_BLANK_POWERDOWN:
+		case FB_BLANK_NORMAL:
 			lcd_on = false;
-			mutex_lock(&hotplug_lock);
-			if (ctrl_hotplug.force_hstate == -1) {
-				target_state = hotplug_adjust_state(DOWN);
-				hotplug_enter_hstate(false, target_state);
-			}
-			mutex_unlock(&hotplug_lock);
 			break;
 		case FB_BLANK_UNBLANK:
 			lcd_on = true;
-			mutex_lock(&hotplug_lock);
-
-			if (ctrl_hotplug.force_hstate == -1)
-				hotplug_enter_hstate(true, H1);
-
-			mutex_unlock(&hotplug_lock);
 			break;
 		}
 	}
@@ -671,6 +672,95 @@ static struct notifier_block hotplug_cpu_pm_notifier = {
 	.notifier_call = hotplug_pm_notify,
 };
 
+static int __ref cpu_online_min_qos_handler(struct notifier_block *b, unsigned
+		long val, void *v)
+{
+	int max_state = -1;
+	int state = 0;
+
+	state = val;
+
+	mutex_lock(&hotplug_lock);
+
+	if (ctrl_hotplug.force_hstate != -1) {
+		mutex_unlock(&hotplug_lock);
+		return NOTIFY_OK;
+	}
+
+	if (state < 0) {
+		mutex_unlock(&hotplug_lock);
+		goto out;
+	}
+
+	if (ctrl_hotplug.max_lock >= 0)
+		max_state = ctrl_hotplug.max_lock;
+
+	if (max_state >= 0 && state <= max_state)
+		state = max_state;
+
+	if ((int)ctrl_hotplug.old_state < state) {
+		ctrl_hotplug.min_lock = state;
+		mutex_unlock(&hotplug_lock);
+		return NOTIFY_OK;
+	}
+
+	mutex_unlock(&hotplug_lock);
+
+out:
+	__force_hstate(state, &ctrl_hotplug.min_lock);
+
+	return NOTIFY_OK;
+}
+
+static int __ref cpu_online_max_qos_handler(struct notifier_block *b, unsigned
+		long val, void *v)
+{
+	int max_state = -1;
+	int state = 0;
+
+	max_state = val;
+	state = val;
+
+	mutex_lock(&hotplug_lock);
+
+	if (ctrl_hotplug.force_hstate != -1) {
+		mutex_unlock(&hotplug_lock);
+		return NOTIFY_OK;
+	}
+
+	if (state < 0) {
+		mutex_unlock(&hotplug_lock);
+		goto out;
+	}
+
+	if (ctrl_hotplug.min_lock >= 0)
+		state = ctrl_hotplug.min_lock;
+
+	if (max_state >= 0 && state <= max_state)
+		state = max_state;
+
+	if ((int)ctrl_hotplug.old_state > state) {
+		ctrl_hotplug.max_lock = state;
+		mutex_unlock(&hotplug_lock);
+		return NOTIFY_OK;
+	}
+
+	mutex_unlock(&hotplug_lock);
+
+out:
+	__force_hstate(state, &ctrl_hotplug.max_lock);
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block cpu_online_min_qos_notifier= {
+	.notifier_call = cpu_online_min_qos_handler,
+};
+
+static struct notifier_block cpu_online_max_qos_notifier= {
+	.notifier_call = cpu_online_max_qos_handler,
+};
+
 static int __init dm_cluster_hotplug_init(void)
 {
 	int ret = 0;
@@ -708,10 +798,11 @@ static int __init dm_cluster_hotplug_init(void)
 		goto err_pm;
 	}
 
-/* We will enable this workqueue after stabilization testing.
+	pm_qos_add_notifier(PM_QOS_CPU_ONLINE_MIN, &cpu_online_min_qos_notifier);
+	pm_qos_add_notifier(PM_QOS_CPU_ONLINE_MAX, &cpu_online_max_qos_notifier);
+
 	queue_delayed_work_on(0, khotplug_wq, &start_hotplug,
 		msecs_to_jiffies(ctrl_hotplug.sampling_rate) * BOOTING_TIME);
-*/
 
 	return 0;
 

@@ -76,7 +76,7 @@
 	artik_s3t9mf {
 		compatible = "samsung,s3t9mf";
 		reset-gpio = <&gpio_b 26 0>;
-		pwms = <&pwm 1 121 0>;
+		pwms = <&pwm 1 1000 0>;
 		pwm-names = "pwm_t9mf";
 		status = "okay";
 	};
@@ -100,6 +100,8 @@
 		 fw_name = "mrvl/sdsd8977_combo_v2.bin";
 		 reg_alpha2 = "US";
 		 p2p_enh = <1>;
+		 inact_tmo = <300>;
+		 txpwrlimit_cfg = "mrvl/txpwrlimit_cfg.bin";
 	};
 
 	sd8xxx-bt {
@@ -163,6 +165,9 @@
 	broken-cd;
 	clock-frequency = <100000000>;
 	supports-detect-complete;
+	keep-power-in-suspend;
+	pm-ignore-notify;
+	powered-resumed-nonremovable-card;
 
 	nexell,drive_dly = <0x0>;
 	nexell,drive_shift = <0x2>;

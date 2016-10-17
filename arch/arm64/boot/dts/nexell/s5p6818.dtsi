@@ -174,6 +174,27 @@
 		};
 	};
 
+	pmu {
+		compatible = "arm,armv8-pmuv3";
+		interrupt-parent = <&gic>;
+		interrupts = <0 IRQ_P0_PMUIRQ0 0>,
+			     <0 IRQ_P0_PMUIRQ1 0>,
+			     <0 IRQ_P0_PMUIRQ2 0>,
+			     <0 IRQ_P0_PMUIRQ3 0>,
+			     <0 IRQ_P1_PMUIRQ0 0>,
+			     <0 IRQ_P1_PMUIRQ1 0>,
+			     <0 IRQ_P1_PMUIRQ2 0>,
+			     <0 IRQ_P1_PMUIRQ3 0>;
+		interrupt-affinity = <&cpu0>,
+				     <&cpu1>,
+				     <&cpu2>,
+				     <&cpu3>,
+				     <&cpu4>,
+				     <&cpu5>,
+				     <&cpu6>,
+				     <&cpu7>;
+	};
+
 	refclk:oscillator {
 		compatible = "nexell,s5p6818,pll";
 		reg = <0xc0010000 0x1000>;
@@ -188,6 +209,8 @@
 	nx-devfreq {
 		compatible = "nexell,s5pxx18-devfreq";
 		pll = <0>;
+		supply_name = "vdd_arm_regulator";
+		vdd_arm_regulator-supply = <&VCC_DCDC1>;
 		status = "disabled";
 	};
 
@@ -788,8 +811,9 @@
 			interrupts = < 0 IRQ_DPC_P 0 >, <0 IRQ_DPC_S 0>;
 			interrupts-names = "dpc.0", "dpc.1";
 
-			resets = <&nexell_reset RESET_ID_DISPLAY>;
-			reset-names = "rsc-display";
+			resets = <&nexell_reset RESET_ID_DISPLAY>,
+					<&nexell_reset RESET_ID_DISP_TOP>;
+			reset-names = "rsc-display", "rsc-display-top";
 
 			status = "disabled";
 
@@ -821,7 +845,7 @@
 			status = "disabled";
 
 			dp-resource {
-				reg_base = <0xc010a000>;
+				reg_base = <0xc010a000 0x100>;
 				clk_base = <0xc0108000 3>;
 				resets = <&nexell_reset RESET_ID_LVDS>;
 				reset-names = "rsc-lvds-phy";
@@ -838,7 +862,7 @@
 			status = "disabled";
 
 			dp-resource {
-				reg_base = <0xc00d0000>;
+				reg_base = <0xc00d0000 0x100>;
 				clk_base = <0xc0105000 2>;
 
 				resets = <&nexell_reset RESET_ID_MIPI>,
@@ -906,6 +930,26 @@
 			reset-names = "scaler-reset";
 			resets = <&nexell_reset RESET_ID_SCALER>;
 			status = "disabled";
+		};
+
+		gpu@c0070000 {
+			compatible = "arm,mali-400", "arm,mali-utgard";
+			reg = <PHYS_BASE_VR 0x10000>;
+			interrupts = <0 IRQ_VR 0>, <0 IRQ_VR 0>, <0 IRQ_VR 0>,
+				<0 IRQ_VR 0>, <0 IRQ_VR 0>, <0 IRQ_VR 0>,
+				<0 IRQ_VR 0>, <0 IRQ_VR 0>, <0 IRQ_VR 0>,
+				<0 IRQ_VR 0>, <0 IRQ_VR 0>;
+			interrupt-names = "IRQGP", "IRQGPMMU", "IRQPP0",
+				"IRQPPMMU0", "IRQPP1", "IRQPPMMU1",
+				"IRQPP2", "IRQPPMMU2", "IRQPP3",
+				"IRQPPMMU3", "IRQPMU";
+			pmu_domain_config = <0x1 0x4 0x8 0x10 0x20 0x0 0x0 0x0
+						0x0 0x2 0x0 0x0>;
+			pmu_switch_delay = <0xff>;
+			clocks = <&vr>;
+			clock-names = "clk_mali";
+			resets = <&nexell_reset RESET_ID_VR>;
+			reset-names = "vr-reset";
 		};
 	}; /*** soc ***/
 };

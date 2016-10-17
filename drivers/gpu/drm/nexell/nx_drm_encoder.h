@@ -25,6 +25,7 @@ struct nx_drm_encoder {
 	int pipe;
 	struct nx_drm_device *display;
 	int dpms;
+	bool enabled;
 	void *context;		/* device context */
 };
 
@@ -32,7 +33,7 @@ struct nx_drm_encoder {
 		container_of(e, struct nx_drm_encoder, encoder)
 
 struct drm_encoder *nx_drm_encoder_create(struct drm_device *drm,
-			struct nx_drm_device *display, int type,
+			struct nx_drm_device *display, int enc_type,
 			int pipe, int possible_crtcs, void *context);
 
 #endif
